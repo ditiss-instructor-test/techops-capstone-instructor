@@ -1,0 +1,6 @@
+{
+  "Version":"2012-10-17",
+  "Statement":[
+    {"Effect":"Allow","Action":["ecr:*","s3:*","ec2:DescribeInstances","ec2:StartInstances","ec2:StopInstances","ssm:SendCommand","iam:PassRole"],"Resource":"*"}
+  ]
+}

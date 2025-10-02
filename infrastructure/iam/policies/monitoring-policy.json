@@ -1,0 +1,6 @@
+{
+  "Version":"2012-10-17",
+  "Statement":[
+    {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogStreams","ec2:DescribeInstances","s3:PutObject","s3:GetObject","cloudwatch:PutMetricData"],"Resource":"*"}
+  ]
+}

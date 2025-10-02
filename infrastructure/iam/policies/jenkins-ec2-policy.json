@@ -1,0 +1,6 @@
+{
+  "Version":"2012-10-17",
+  "Statement":[
+    {"Effect":"Allow","Action":["ecr:GetAuthorizationToken","ecr:BatchGetImage","ecr:GetDownloadUrlForLayer","ecr:BatchCheckLayerAvailability","s3:GetObject","s3:PutObject","ssm:GetParameters","ssm:GetParameter","secretsmanager:GetSecretValue","iam:PassRole"],"Resource":"*"}
+  ]
+}
