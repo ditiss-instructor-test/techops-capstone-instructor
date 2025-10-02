@@ -1,7 +1,7 @@
 resource "null_resource" "hello" {
   # this trigger forces recreation if you change the message
   triggers = {
-    message = "Hello from Terraform Cloud at ${timestamp()}"
+    message = "Hello from Terraform SID Cloud at ${timestamp()}"
   }
 
   provisioner "local-exec" {
