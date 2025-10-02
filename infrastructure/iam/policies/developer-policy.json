@@ -1,0 +1,7 @@
+{
+  "Version":"2012-10-17",
+  "Statement":[
+    {"Effect":"Allow","Action":["ecr:GetAuthorizationToken","ecr:BatchGetImage","ecr:GetDownloadUrlForLayer","ecr:BatchCheckLayerAvailability","ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage"],"Resource":"*"},
+    {"Effect":"Allow","Action":["ec2:DescribeInstances","ec2:RunInstances","ec2:StopInstances","ec2:StartInstances"],"Resource":"*"}
+  ]
+}

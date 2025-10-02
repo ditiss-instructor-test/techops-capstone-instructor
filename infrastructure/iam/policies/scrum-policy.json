@@ -1,0 +1,6 @@
+{
+  "Version":"2012-10-17",
+  "Statement":[
+    {"Effect":"Allow","Action":["ec2:Describe*","vpc:Describe*","s3:ListAllMyBuckets","s3:GetBucketLocation","cloudwatch:GetMetricData","logs:DescribeLogGroups","logs:DescribeLogStreams"],"Resource":"*"}
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "Version":"2012-10-17",
+  "Statement":[
+    {"Effect":"Allow","Action":["ec2:Describe*","vpc:Describe*","route53:ListHostedZones","ec2:DescribeTags","s3:ListAllMyBuckets","s3:GetBucketLocation"],"Resource":"*"},
+    {"Effect":"Allow","Action":["tag:GetResources","tag:TagResources"],"Resource":"*"}
+  ]
+}
