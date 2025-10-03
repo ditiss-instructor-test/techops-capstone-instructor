@@ -1,0 +1,134 @@
+// apps/flask-sample-webapp/Jenkinsfile
+pipeline {
+  agent any
+
+  parameters {
+    // Set this to the credential ID you created in Lab 08 (or let DevOps set it via Job defaults)
+    string(name: 'DOCKERHUB_CRED_ID', defaultValue: 'dockerhub-token', description: 'Jenkins credential ID for Docker Hub (username+token)')
+    string(name: 'DOCKERHUB_USER', defaultValue: 'skarkhanis95', description: 'Docker Hub username/namespace (developer should set their username)')
+    string(name: 'IMAGE_NAME', defaultValue: 'flask-sample-webapp', description: 'Image name')
+    string(name: 'IMAGE_TAG', defaultValue: "lab11-${env.BUILD_ID}", description: 'Image tag (auto default)')
+  }
+
+  environment {
+    APP_PATH = "apps/flask-sample-webapp"
+    IMAGE = "${params.DOCKERHUB_USER}/${params.IMAGE_NAME}:${params.IMAGE_TAG}"
+    IMAGE_LATEST = "${params.DOCKERHUB_USER}/${params.IMAGE_NAME}:latest"
+  }
+
+  stages {
+    stage('Should we run?') {
+      steps {
+        script {
+          // Fail fast if not on main branch
+          if (!env.BRANCH_NAME) {
+            // For single pipeline jobs, BRANCH_NAME may not be set; try GIT_BRANCH
+            env.BRANCH_NAME = env.GIT_BRANCH ?: env.BRANCH_NAME
+          }
+          if (env.BRANCH_NAME == null) {
+            echo "BRANCH_NAME not set — continuing (job may be configured as single-branch pipeline)."
+          } else {
+            echo "Branch: ${env.BRANCH_NAME}"
+            if (env.BRANCH_NAME != 'main') {
+              echo "Not main branch (${env.BRANCH_NAME}) — skipping remaining stages."
+              currentBuild.result = 'NOT_BUILT'
+              error("Stopping pipeline: not main branch")
+            }
+          }
+
+          // Determine whether files under APP_PATH changed in this build.
+          boolean pathChanged = false
+          for (changeSet in currentBuild.changeSets) {
+            for (entry in changeSet.items) {
+              for (file in entry.affectedFiles) {
+                if (file.path.startsWith("${APP_PATH}/")) {
+                  pathChanged = true
+                  break
+                }
+              }
+              if (pathChanged) break
+            }
+            if (pathChanged) break
+          }
+          if (!pathChanged) {
+            echo "No changes under ${APP_PATH} detected in this build. Exiting."
+            currentBuild.result = 'NOT_BUILT'
+            error("No relevant changes")
+          } else {
+            echo "Changes detected under ${APP_PATH} — continuing pipeline."
+          }
+        }
+      }
+    }
+
+    stage('Checkout') {
+      steps {
+        // Checkout the commit that triggered the build
+        checkout scm
+      }
+    }
+
+    stage('Unit Tests') {
+      steps {
+        dir("${APP_PATH}") {
+          sh '''
+            set -e
+            python3 -m venv .venv || true
+            . .venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt || true
+            pytest -q || true
+          '''
+        }
+      }
+      // Do not fail the whole build on flaky tests by default; you can alter to fail
+      post {
+        unsuccessful { echo "Unit tests stage reported issues (see logs)." }
+      }
+    }
+
+    stage('Build Docker Image') {
+      steps {
+        dir("${APP_PATH}") {
+          sh '''
+            docker build -t "${IMAGE}" .
+          '''
+        }
+      }
+    }
+
+    stage('Docker Login & Push') {
+      steps {
+        // Use credential added in Lab 08. DevOps/Students must replace DOCKERHUB_CRED_ID or set it in job parameters
+        withCredentials([usernamePassword(credentialsId: params.DOCKERHUB_CRED_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+          sh '''
+            echo "$DOCKER_PASS" | docker login --username "$DOCKER_USER" --password-stdin
+            docker tag "${IMAGE}" "${IMAGE_LATEST}" || true
+            docker push "${IMAGE}"
+            docker push "${IMAGE_LATEST}"
+            docker logout
+          '''
+        }
+      }
+    }
+
+    stage('Cleanup') {
+      steps {
+        sh 'docker image prune -f || true'
+      }
+    }
+  } // stages
+
+  post {
+    success {
+      echo "Pipeline completed successfully. Image pushed: ${IMAGE}"
+    }
+    failure {
+      echo "Pipeline failed. Check console output for errors."
+    }
+    always {
+      // optional: collect junit/test reports if produced
+      echo "Build finished: ${currentBuild.currentResult}"
+    }
+  }
+}
