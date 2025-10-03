@@ -182,6 +182,71 @@
         enabled: yes
       become: yes
 
+    - name: Ensure docker group exists
+      group:
+        name: docker
+        state: present
+      become: yes
+      register: docker_group_create
+      failed_when: false
+
+    - name: Ensure jenkins user exists (safe-check)
+      user:
+        name: "{{ jenkins_user }}"
+        state: present
+      become: yes
+      register: ensure_jenkins_user
+
+    - name: Add jenkins user to docker group (idempotent)
+      user:
+        name: "{{ jenkins_user }}"
+        groups: docker
+        append: yes
+      become: yes
+      register: jenkins_group_change
+      notify: restart jenkins
+
+    - name: Create systemd drop-in dir for jenkins service
+      file:
+        path: /etc/systemd/system/{{ jenkins_service_name }}.service.d
+        state: directory
+        mode: '0755'
+      become: yes
+
+    - name: Write systemd drop-in to ensure SupplementaryGroups includes docker
+      copy:
+        dest: /etc/systemd/system/{{ jenkins_service_name }}.service.d/supp-groups.conf
+        content: |
+          [Service]
+          # ensure the jenkins service has docker supplementary group available
+          SupplementaryGroups=docker
+        owner: root
+        group: root
+        mode: '0644'
+      become: yes
+      register: systemd_dropin_changed
+      notify:
+        - daemon-reload
+        - restart jenkins
+
+    - name: Wait 2s for system to settle (systemd changes)
+      pause:
+        seconds: 2
+      when: systemd_dropin_changed.changed or jenkins_group_change.changed
+      become: no
+
+    - name: Verify jenkins user group membership (on host)
+      command: id {{ jenkins_user }}
+      register: jenkins_id_out
+      changed_when: false
+      failed_when: false
+      become: yes
+
+    - name: Debug jenkins groups (show current groups for jenkins)
+      debug:
+        msg: "jenkins groups: {{ jenkins_id_out.stdout }}"
+      when: jenkins_id_out is defined
+
     - name: Try to install docker-compose plugin (Debian)
       when: ansible_os_family == 'Debian' and docker_compose_plugin
       apt:
@@ -360,4 +425,8 @@
       service:
         name: "{{ jenkins_service_name }}"
         state: restarted
+      become: yes
+
+    - name: daemon-reload
+      command: systemctl daemon-reload
       become: yes
