@@ -1,0 +1,432 @@
+---
+# ansible/playbooks/jenkins_prepare_node.yml
+# Idempotent playbook to prepare a Jenkins EC2 node with Docker, AWS CLI, and common tools.
+# Supports Debian/Ubuntu, RHEL/CentOS, and Amazon Linux.
+#
+# Usage:
+# ansible-playbook -i ansible/inventories/jenkins.ini ansible/playbooks/jenkins_prepare_node.yml
+
+- name: Prepare Jenkins node (Docker, AWS CLI, common tools)
+  hosts: jenkins
+  vars:
+    awscli_version: "latest"  # Use latest to avoid version mismatch
+    docker_ce_version: "24.0.7"  # Base Docker version (will append distribution suffix for Debian/Ubuntu)
+    docker_compose_plugin: true
+    jenkins_user: "jenkins"
+    jenkins_service_name: "jenkins"
+    arch_map:
+      x86_64: amd64
+      aarch64: arm64
+    docker_compose_arch_map:
+      x86_64: x86_64
+      aarch64: aarch64
+    awscli_zip_url: "https://awscli.amazonaws.com/awscli-exe-linux-{{ docker_compose_arch_map[ansible_architecture] | default(ansible_architecture) }}.zip"
+    docker_compose_url: "https://github.com/docker/compose/releases/latest/download/docker-compose-Linux-{{ docker_compose_arch_map[ansible_architecture] | default(ansible_architecture) }}"
+
+  pre_tasks:
+    - name: Gather minimal facts
+      ansible.builtin.setup:
+        gather_subset:
+          - '!all'
+          - 'min'
+      changed_when: false
+      become: no
+
+  tasks:
+    # -----------------------
+    # Common Packages
+    # -----------------------
+    - name: Install common packages (Debian/Ubuntu)
+      when: ansible_os_family == 'Debian'
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - unzip
+          - git
+          - jq
+          - build-essential
+        update_cache: yes
+        state: present
+      become: yes
+
+    - name: Install common packages (RHEL/CentOS)
+      when: ansible_os_family == 'RedHat' and ansible_distribution != 'Amazon'
+      yum:
+        name:
+          - curl
+          - unzip
+          - git
+          - jq
+          - python3
+          - gcc
+          - make
+        state: present
+      become: yes
+
+    - name: Install common packages (Amazon Linux)
+      when: ansible_distribution == 'Amazon'
+      yum:
+        name:
+          - curl
+          - unzip
+          - git
+          - jq
+          - python3
+          - gcc
+          - make
+        state: present
+      become: yes
+
+    # -----------------------
+    # Docker repo + engine
+    # -----------------------
+    - name: Ensure docker GPG key and keyring (Debian)
+      when: ansible_os_family == 'Debian'
+      block:
+        - name: Create /usr/share/keyrings if missing
+          file:
+            path: /usr/share/keyrings
+            state: directory
+            mode: '0755'
+          become: yes
+
+        - name: Download Docker GPG and create keyring
+          command: >
+            bash -lc "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg"
+          args:
+            creates: /usr/share/keyrings/docker-archive-keyring.gpg
+          become: yes
+
+        - name: Add Docker apt repo
+          apt_repository:
+            repo: "deb [arch={{ arch_map[ansible_architecture] | default(ansible_architecture) }} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+            filename: docker
+            state: present
+          notify: apt_update
+          become: yes
+
+    - name: Update apt cache (Debian)
+      when: ansible_os_family == 'Debian'
+      apt:
+        update_cache: yes
+      become: yes
+
+    - name: Get available Docker versions (Debian)
+      when: ansible_os_family == 'Debian'
+      shell: apt-cache madison docker-ce | awk '{print $3}' | grep "{{ docker_ce_version }}"
+      register: docker_version_check
+      changed_when: false
+      failed_when: false
+      become: yes
+
+    - name: Set Docker version with distribution suffix (Debian)
+      set_fact:
+        effective_docker_version: "{{ (docker_version_check.stdout_lines | select('match', '^5:' + docker_ce_version + '-1~ubuntu\\.' + ansible_distribution_version + '~' + ansible_distribution_release + '$') | first) | default('latest') }}"
+      when: ansible_os_family == 'Debian'
+
+    - name: Warn if falling back to latest Docker version
+      debug:
+        msg: "Desired Docker version {{ docker_ce_version }} not found for {{ ansible_distribution }} {{ ansible_distribution_version }}. Falling back to latest."
+      when: ansible_os_family == 'Debian' and effective_docker_version == 'latest'
+
+    - name: Add Docker repo (RHEL/CentOS)
+      when: ansible_os_family == 'RedHat' and ansible_distribution != 'Amazon'
+      yum_repository:
+        name: docker-ce-stable
+        description: Docker CE Stable - $basearch
+        baseurl: "https://download.docker.com/linux/centos/{{ ansible_distribution_major_version }}/{{ arch_map[ansible_architecture] | default(ansible_architecture) }}/stable"
+        gpgcheck: yes
+        gpgkey: https://download.docker.com/linux/centos/gpg
+        enabled: yes
+      become: yes
+
+    - name: Enable Docker in amazon-linux-extras (Amazon Linux)
+      when: ansible_distribution == 'Amazon'
+      command: amazon-linux-extras install docker -y
+      args:
+        creates: /usr/bin/docker
+      become: yes
+
+    - name: Install Docker engine (Debian)
+      when: ansible_os_family == 'Debian'
+      apt:
+        name:
+          - docker-ce={{ effective_docker_version | default('latest') }}
+          - docker-ce-cli={{ effective_docker_version | default('latest') }}
+          - containerd.io
+        state: present
+      register: docker_install_debian
+      notify: restart docker
+      become: yes
+
+    - name: Install Docker engine (RHEL/CentOS)
+      when: ansible_os_family == 'RedHat' and ansible_distribution != 'Amazon'
+      yum:
+        name:
+          - docker-ce={{ docker_ce_version }}
+          - docker-ce-cli={{ docker_ce_version }}
+          - containerd.io
+        state: present
+      register: docker_install_rhel
+      notify: restart docker
+      become: yes
+
+    - name: Ensure docker service is enabled and started
+      service:
+        name: docker
+        state: started
+        enabled: yes
+      become: yes
+
+    - name: Ensure docker group exists
+      group:
+        name: docker
+        state: present
+      become: yes
+      register: docker_group_create
+      failed_when: false
+
+    - name: Ensure jenkins user exists (safe-check)
+      user:
+        name: "{{ jenkins_user }}"
+        state: present
+      become: yes
+      register: ensure_jenkins_user
+
+    - name: Add jenkins user to docker group (idempotent)
+      user:
+        name: "{{ jenkins_user }}"
+        groups: docker
+        append: yes
+      become: yes
+      register: jenkins_group_change
+      notify: restart jenkins
+
+    - name: Create systemd drop-in dir for jenkins service
+      file:
+        path: /etc/systemd/system/{{ jenkins_service_name }}.service.d
+        state: directory
+        mode: '0755'
+      become: yes
+
+    - name: Write systemd drop-in to ensure SupplementaryGroups includes docker
+      copy:
+        dest: /etc/systemd/system/{{ jenkins_service_name }}.service.d/supp-groups.conf
+        content: |
+          [Service]
+          # ensure the jenkins service has docker supplementary group available
+          SupplementaryGroups=docker
+        owner: root
+        group: root
+        mode: '0644'
+      become: yes
+      register: systemd_dropin_changed
+      notify:
+        - daemon-reload
+        - restart jenkins
+
+    - name: Wait 2s for system to settle (systemd changes)
+      pause:
+        seconds: 2
+      when: systemd_dropin_changed.changed or jenkins_group_change.changed
+      become: no
+
+    - name: Verify jenkins user group membership (on host)
+      command: id {{ jenkins_user }}
+      register: jenkins_id_out
+      changed_when: false
+      failed_when: false
+      become: yes
+
+    - name: Debug jenkins groups (show current groups for jenkins)
+      debug:
+        msg: "jenkins groups: {{ jenkins_id_out.stdout }}"
+      when: jenkins_id_out is defined
+
+    - name: Try to install docker-compose plugin (Debian)
+      when: ansible_os_family == 'Debian' and docker_compose_plugin
+      apt:
+        name: docker-compose-plugin
+        state: present
+      register: docker_compose_pkg
+      failed_when: false
+      become: yes
+
+    - name: Try to install docker-compose plugin (RHEL/CentOS)
+      when: ansible_os_family == 'RedHat' and ansible_distribution != 'Amazon' and docker_compose_plugin
+      yum:
+        name: docker-compose-plugin
+        state: present
+      register: docker_compose_pkg
+      failed_when: false
+      become: yes
+
+    - name: Fallback - install docker-compose binary if plugin not available
+      when: docker_compose_plugin and (docker_compose_pkg is failed or docker_compose_pkg is skipped)
+      block:
+        - name: Check if docker-compose binary exists
+          stat:
+            path: /usr/local/bin/docker-compose
+          register: docker_compose_binary
+          become: yes
+
+        - name: Download docker-compose binary (fallback)
+          get_url:
+            url: "{{ docker_compose_url }}"
+            dest: /usr/local/bin/docker-compose
+            mode: '0755'
+          when: not docker_compose_binary.stat.exists
+          become: yes
+
+        - name: Ensure docker-compose is executable
+          file:
+            path: /usr/local/bin/docker-compose
+            mode: '0755'
+          become: yes
+
+    - name: Ensure jenkins user exists
+      user:
+        name: "{{ jenkins_user }}"
+        state: present
+        create_home: yes
+        shell: /bin/bash
+      become: yes
+
+    - name: Check if jenkins user exists
+      getent:
+        database: passwd
+        key: "{{ jenkins_user }}"
+      register: jenkins_user_check
+      failed_when: false
+      become: no
+
+    - name: Add jenkins user to docker group
+      when: jenkins_user_check.getent_passwd is defined
+      user:
+        name: "{{ jenkins_user }}"
+        groups: docker
+        append: yes
+      notify: restart jenkins
+      become: yes
+
+    - name: Ensure AWS CLI is executable by all
+      file:
+        path: /usr/local/bin/aws
+        mode: '0755'
+      become: yes
+
+    # -----------------------
+    # AWS CLI v2
+    # -----------------------
+    - name: Check installed AWS CLI version
+      command: /usr/local/bin/aws --version
+      register: aws_ver_check
+      changed_when: false
+      failed_when: false
+      become: no
+
+    - name: Download AWS CLI v2 installer zip
+      when: aws_ver_check.rc != 0 or awscli_version not in aws_ver_check.stdout
+      get_url:
+        url: "{{ awscli_zip_url }}"
+        dest: "/home/{{ ansible_user }}/awscliv2.zip"
+        mode: '0644'
+      become: no
+
+    - name: Unzip AWS CLI installer
+      when: aws_ver_check.rc != 0 or awscli_version not in aws_ver_check.stdout
+      unarchive:
+        src: "/home/{{ ansible_user }}/awscliv2.zip"
+        dest: "/home/{{ ansible_user }}"
+        remote_src: yes
+      become: no
+
+    - name: Install AWS CLI v2
+      when: aws_ver_check.rc != 0 or awscli_version not in aws_ver_check.stdout
+      command: "/home/{{ ansible_user }}/aws/install"
+      args:
+        creates: /usr/local/bin/aws
+      become: yes
+
+    - name: Clean up AWS CLI installer files
+      when: aws_ver_check.rc == 0 and awscli_version in aws_ver_check.stdout
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/home/{{ ansible_user }}/awscliv2.zip"
+        - "/home/{{ ansible_user }}/aws"
+      become: no
+
+    - name: Verify aws is executable
+      command: /usr/local/bin/aws --version
+      register: aws_ver
+      changed_when: false
+      failed_when: aws_ver.rc != 0
+      become: no
+
+    - name: Debug aws verification failure
+      debug:
+        msg: "Failed to verify aws cli: {{ aws_ver.stderr | default('No stderr available') }}"
+      when: aws_ver.rc != 0
+      become: no
+
+    # -----------------------
+    # Final sanity checks as jenkins user
+    # -----------------------
+    - name: Verify docker command as jenkins user
+      become_user: "{{ jenkins_user }}"
+      command: docker --version
+      register: docker_ver
+      changed_when: false
+      failed_when: false
+      when: jenkins_user_check.getent_passwd is defined
+      become: yes
+
+    - name: Debug docker verification failure as jenkins user
+      debug:
+        msg: "Failed to verify docker as {{ jenkins_user }}: {{ docker_ver.stderr | default('No stderr available') }}"
+      when: jenkins_user_check.getent_passwd is defined and docker_ver is defined and docker_ver.rc != 0
+      become: no
+
+    - name: Verify aws cli as jenkins user
+      become_user: "{{ jenkins_user }}"
+      command: /usr/local/bin/aws --version
+      register: aws_j_ver
+      changed_when: false
+      failed_when: false
+      when: jenkins_user_check.getent_passwd is defined
+      become: yes
+
+    - name: Debug aws cli verification failure as jenkins user
+      debug:
+        msg: "Failed to verify aws cli as {{ jenkins_user }}: {{ aws_j_ver.stderr | default('No stderr available') }}"
+      when: jenkins_user_check.getent_passwd is defined and aws_j_ver is defined and aws_j_ver.rc != 0
+      become: no
+
+  handlers:
+    - name: apt_update
+      apt:
+        update_cache: yes
+      become: yes
+
+    - name: restart docker
+      service:
+        name: docker
+        state: started
+      when: docker_install_debian.changed or docker_install_rhel.changed
+      become: yes
+
+    - name: restart jenkins
+      service:
+        name: "{{ jenkins_service_name }}"
+        state: restarted
+      become: yes
+
+    - name: daemon-reload
+      command: systemctl daemon-reload
+      become: yes

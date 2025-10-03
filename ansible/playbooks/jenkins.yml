@@ -1,0 +1,103 @@
+---
+- name: Install Jenkins and display initial admin password
+  hosts: jenkins
+  become: yes
+  vars:
+    jenkins_home: /var/lib/jenkins
+    java_home_path: "/usr/lib/jvm/java-17-openjdk-amd64"
+    jenkins_cli_path: /tmp/jenkins-cli.jar
+    jenkins_url_local: "http://localhost:8080"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install packages required for apt over https and utils
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+        state: present
+        update_cache: yes
+
+    - name: Install OpenJDK 17
+      apt:
+        name: openjdk-17-jdk
+        state: present
+
+    - name: Ensure JAVA_HOME is set for Jenkins
+      lineinfile:
+        path: /etc/default/jenkins
+        regexp: '^JAVA_HOME='
+        line: 'JAVA_HOME="{{ java_home_path }}"'
+        create: yes
+      notify: Restart Jenkins
+
+    - name: Add Jenkins apt key
+      apt_key:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins apt repository
+      apt_repository:
+        repo: 'deb https://pkg.jenkins.io/debian-stable binary/'
+        state: present
+
+    - name: Update apt after adding jenkins repo
+      apt:
+        update_cache: yes
+
+    - name: Install Jenkins package
+      apt:
+        name: jenkins
+        state: present
+
+    - name: Ensure jenkins home ownership and perms
+      file:
+        path: "{{ jenkins_home }}"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        recurse: yes
+
+    - name: Ensure Jenkins service is started & enabled
+      service:
+        name: jenkins
+        state: started
+        enabled: yes
+
+    - name: Wait for Jenkins HTTP to be available locally
+      wait_for:
+        host: 127.0.0.1
+        port: 8080
+        timeout: 300
+        state: started
+
+    - name: Give Jenkins a few extra seconds to initialize
+      pause:
+        seconds: 8
+
+    - name: Read initial admin password (if present)
+      command: cat {{ jenkins_home }}/secrets/initialAdminPassword
+      register: initial_pass_cmd
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Show initial admin password (if found)
+      debug:
+        msg: |
+          === Jenkins initial admin password (if present) ===
+          {{ initial_pass_cmd.stdout | default("NOT FOUND: initialAdminPassword file missing or setup already completed") }}
+      when: initial_pass_cmd is defined
+
+  handlers:
+    - name: Restart Jenkins
+      service:
+        name: jenkins
+        state: restarted

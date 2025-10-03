@@ -1,0 +1,2 @@
+jenkins_admin_user: admin
+jenkins_admin_password: ChangeMe123!     # for classroom use; use vault in production
